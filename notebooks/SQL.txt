@@ -1,0 +1,238 @@
+--DWH
+DROP TABLE IF exists dim_playlist;
+CREATE TABLE dim_playlist AS
+SELECT 
+    p.playlistid AS playlisttrack_playlistid,
+    p.trackid,
+    pl.playlistid AS playlist_playlistid,
+    pl.name AS playlist_name
+FROM playlisttrack p
+LEFT JOIN playlist pl
+    ON p.playlistid = pl.playlistid
+;
+DROP TABLE IF EXISTS dim_customer;
+CREATE table Dim_customer as 
+ SELECT c.customerid, 
+ 		initcap(lower(c.firstname)) AS firstname,
+    	initcap(lower(c.lastname)) AS lastname,
+    	c.company, c.address, c.city, c.state,
+  	    c.country, c.postalcode, c.phone, c.fax,
+        c.email, c.supportrepid, split_part(c.email, '@', 2) as email_domain 
+FROM customer c
+;
+DROP TABLE IF exists Dim_employee;
+create table Dim_employee as
+ select e.*, db.department_name_x, db.budget,
+ 		date_part('year', age(CURRENT_DATE, e.hiredate)) as years_worked,
+ 		split_part(e.email, '@', 2) as email_domain,
+ 		case when e.employeeid in (
+            select distinct reportsto
+            	from employee
+             where reportsto is not null
+            ) then 1
+        	   else 0 end as is_manager
+ 	from employee e
+ 		left join department_budget db 
+ 			on e.departmentid = db.department_id
+ ;
+DROP TABLE IF exists Dim_track;
+CREATE TABLE dim_track AS
+SELECT t.trackid, t.name AS track_name, t.albumid,
+       t.mediatypeid, t.genreid, t.composer, t.milliseconds,
+       t.bytes, t.unitprice,a.title AS album_title, a.albumid AS album_albumid,
+       r.artistid, r.name AS artist_name, m.name AS mediatype_name, g.name AS genre_name,
+       ROUND(t.milliseconds / 1000.0, 2) AS seconds,
+       LPAD(FLOOR(t.milliseconds / 60000)::TEXT, 2, '0') || ':' ||
+       LPAD(FLOOR((t.milliseconds % 60000) / 1000)::TEXT, 2, '0') AS mmss
+ FROM track t
+		LEFT JOIN album a
+			ON t.albumid = a.albumid
+		LEFT JOIN artist r 
+			ON a.artistid = r.artistid
+		LEFT JOIN mediatype m 
+			ON t.mediatypeid = m.mediatypeid
+		LEFT JOIN genre g 
+ 			ON t.genreid = g.genreid;
+;
+DROP TABLE IF exists Fact_invoice;
+create table Fact_invoice as
+ select *
+ 	from invoice i
+;
+DROP TABLE IF exists Fact_invoiceline;
+create table Fact_invoiceline as
+ select i.*,
+ 		(i.unitprice * i.quantity) as line_total
+ 	from invoiceline i
+;
+
+--SQL-Analytics
+with playlist_counts as (
+    select pt.playlistid, p.name as playlist_name, 
+           count(pt.trackid) as track_count
+    	from playlisttrack pt
+		    join playlist p 
+		      on pt.playlistid = p.playlistid
+      group by pt.playlistid, p.name)
+select(select string_agg(playlist_name, ', ')
+      	from (select playlist_name from playlist_counts
+        		order by track_count desc limit 2) t) as top_2_playlists,
+    (select string_agg(playlist_name, ', ')
+      from (select playlist_name
+        	   from playlist_counts
+        	  order by track_count asc
+       		 limit 2) t) as bottom_2_playlists,
+    		round(avg(track_count), 2) as average_tracks_per_playlist
+from playlist_counts
+;
+
+with counted_tracks as (
+ 	select distinct dt.trackid , count(fn.*) as number_of_sales
+ 		from dim_track dt
+ 	     left join fact_invoiceline fi 
+ 	     	on dt.trackid = fi.trackid
+ 	     left join fact_invoice fn
+ 	     	on fi.invoiceid = fn.invoiceid 
+ 	  group by dt.trackid)
+select case when number_of_sales = 0 then 'none'
+			when number_of_sales >= 1 and number_of_sales < 5 then 'low'
+			when number_of_sales >= 5 and number_of_sales < 10 then 'mid'
+			when number_of_sales >= 10 then 'high' end as groups,
+		sum(number_of_sales) as number_per_group
+	from counted_tracks
+ group by groups
+order by groups
+;
+
+with country_totals as (select fi.billingcountry as country,
+						       sum(fl.line_total) as total_sales
+                        	from fact_invoice fi
+                              join fact_invoiceline fl 
+                            	on fi.invoiceid = fl.invoiceid
+                          group by fi.billingcountry),
+	top5 as (select * 
+  			 	from country_totals
+              order by total_sales desc
+             limit 5),
+	bottom5 as (select * 
+  					from country_totals
+  				  order by total_sales asc
+  				limit 5)
+select * 
+   from top5
+	 union all select * from bottom5
+order by total_sales desc
+;
+
+with country_totals as (select fi.billingcountry as country,
+						       sum(fl.line_total) as total_sales
+                        	from fact_invoice fi
+                              join fact_invoiceline fl 
+                            	on fi.invoiceid = fl.invoiceid
+                          group by fi.billingcountry),
+	top5 as (select * 
+  			 	from country_totals
+              order by total_sales desc
+             limit 5),
+	bottom5 as (select * 
+  					from country_totals
+  				  order by total_sales asc
+  				limit 5),
+	target_countries as (select country, total_sales 
+						 	from top5
+  						  union all 
+  						  	select country, total_sales from bottom5),
+	sales_by_genre as (select fi.billingcountry as country, dt.genre_name as genre,
+    						  sum(fl.line_total) as genre_sales
+  					   	  from fact_invoice fi
+  						  	join fact_invoiceline fl 
+    							on fi.invoiceid = fl.invoiceid
+  							join dim_track dt 
+    							on fl.trackid = dt.trackid
+  						 where fi.billingcountry in (select country from target_countries)
+  						group by fi.billingcountry, dt.genre_name)
+select sbg.country, sbg.genre, sbg.genre_sales, tc.total_sales,
+ 	   round(sbg.genre_sales / tc.total_sales * 100, 2) as pct_of_country_sales,
+ 	   rank() over (partition by sbg.country order by sbg.genre_sales desc) as genre_rank
+	from sales_by_genre sbg
+		join target_countries tc 
+  			on sbg.country = tc.country
+  order by tc.total_sales desc,sbg.country, genre_rank
+;
+		
+with number_and_average_of_orders as (
+				select fi.customerid, fi.billingcountry,
+       				   count(distinct fi.invoiceid) as number_of_orders,
+       				   round(avg(fn.quantity * fn.unitprice), 2) as average_spending
+    				from fact_invoice fi
+   					 left join fact_invoiceline fn 
+   					 	on fi.invoiceid = fn.invoiceid
+   				 group by fi.customerid, fi.billingcountry),
+country_summary as (
+    			select billingcountry as country,
+        			   count(distinct customerid) as number_of_customers,
+        			   round(avg(number_of_orders), 2) as average_orders_per_customer,
+        			   round(avg(average_spending), 2) as average_spending_per_customer
+    				from number_and_average_of_orders
+    			 group by billingcountry),
+country_final as (
+  			  select case when number_of_customers = 1 then 'Other'
+  			         else country end as grouped_country,
+        			 sum(number_of_customers) as number_of_customers,
+       			     round(avg(average_orders_per_customer), 2) as average_orders_per_customer,
+        			 round(avg(average_spending_per_customer), 2) as average_spending_per_customer
+    			from country_summary
+    		  group by case when number_of_customers = 1 then 'Other'
+            			else country end )
+select *
+	from country_final
+ order by number_of_customers desc
+;
+
+with employee_sales as (
+		select e.employeeid,
+		       e.firstname || ' ' || e.lastname as employee_name,
+		       date_part('year',age(date_trunc('year', fi.invoicedate),
+		       e.hiredate)) as years_of_vet,
+        	   extract(year from fi.invoicedate)::int as sales_year,
+		       count(distinct fi.customerid) as customers_handled,
+		       sum(fil.line_total) as total_sales
+    	   from stg.fact_invoice fi
+		    join stg.fact_invoiceline fil 
+		      on fi.invoiceid = fil.invoiceid
+		    join stg.dim_customer dc 
+		      on fi.customerid = dc.customerid
+		    join stg.dim_employee e 
+		      on dc.supportrepid = e.employeeid
+    	group by e.employeeid, employee_name, years_of_vet, sales_year),
+	 			 ranked as (select es.*, lag(total_sales) over (
+          				partition by employeeid order by sales_year)                                               as prior_year_sales
+    	from employee_sales es)
+select employeeid, employee_name, years_of_vet, sales_year,
+    	customers_handled, total_sales,
+    	case when prior_year_sales is null then null
+      	else round((total_sales - prior_year_sales) * 100.0 / prior_year_sales, 2)
+    	end as pct_sales_growth
+	from ranked
+ order by employeeid, sales_year
+;
+-- top 3 genres per country for every year:
+select *
+from(
+	select country||' '||year as country, genre,
+	row_number() over(partition by country,year order by songs_purchased_from_genre desc) as genre_rank_in_year,
+	songs_purchased_from_genre
+	from(
+		with asdf as (
+		select i.billingcountry as country,
+				extract(year from i.invoicedate) as year,
+				g.name as genre
+				from invoiceline il
+				left join invoice i on i.invoiceid = il.invoiceid
+				left join track t on t.trackid = il.trackid
+				left join genre g on g.genreid  = t.genreid)
+		select *, count(genre) as songs_purchased_from_genre
+		from asdf
+		group by country, year,genre) as a)as b
+where genre_rank_in_year in (1,2,3)
+;

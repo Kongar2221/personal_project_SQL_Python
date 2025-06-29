@@ -1,0 +1,412 @@
+import pandas as pd
+from google.colab import drive
+drive.mount('/content/drive')
+
+department_details = pd.read_csv("/content/drive/MyDrive/Final Project/raw-department.txt",delimiter='-')
+department_details.head()
+--
+subdepartment_details = pd.read_json("/content/drive/MyDrive/Final Project/raw-department-budget2.txt")
+subdepartment_details.head()
+--
+raw_department = pd.read_json("/content/drive/MyDrive/Final Project/raw-department-budget.txt", lines=True)
+raw_department.head()
+
+All_Sub_Dep = pd.concat([raw_department, subdepartment_details], ignore_index=True)
+
+All_Budget = All_Sub_Dep.merge(department_details[['department_id', 'department_name']], on='department_id', how='left')
+
+Dep_Budget = All_Budget.drop(columns=['sub_dep_id', 'sub_dep_name'])
+
+Dep_Budget.head()
+
+departments = pd.DataFrame()
+departments = department_details.copy()
+departments.head()
+
+merged_df = departments.merge(Dep_Budget, on='department_id', how='left')
+correct_merge =merged_df.drop(columns=['department_name_y'])
+dim_department = correct_merge.groupby(['department_id', 'department_name_x'],as_index=False)['budget'].sum()
+dim_department
+
+from sqlalchemy import create_engine
+user = "*******************"
+password = "*********"
+host = "hostname.pooler.supabase.com"
+port = "5432"
+database = "postgres"
+schema = "stg"
+engine = create_engine(f"postgresql://{user}:{password}@{host}:{port}/{database}")
+dim_department.to_sql(
+    "department_budget",
+    engine,
+    schema=schema,
+    index=False,
+    if_exists="replace"
+)
+API CURRENCIES
+#Bringing necessary table for time
+import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy import text
+
+user = "*******************"
+password = "*********"
+host = "hostname.pooler.supabase.com"
+port = "5432"
+database = "postgres"
+schema = "stg"
+engine = create_engine(f"postgresql://{user}:{password}@{host}:{port}/{database}")
+
+def load_table(table_name):
+    query = text(f"SELECT * FROM stg.{table_name};")
+    return pd.read_sql(query, engine)
+
+invoice = load_table("invoice")
+
+#Creation of function and then Creation of time table with function
+import pandas as pd
+import requests
+import time
+
+api_key = "the api key"
+
+def get_usd_to_ils_rate(date_str):
+    url = f"https://openexchangerates.org/api/historical/{date_str}.json"
+    params = {
+        "app_id": api_key,
+        "symbols": "USD,ILS"
+    }
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        eur_to_usd = data["rates"]["USD"]
+        eur_to_ils = data["rates"]["ILS"]
+        usd_to_ils = eur_to_ils / eur_to_usd
+        return usd_to_ils
+    except Exception as e:
+        print(f"Failed to fetch rate for {date_str}: {e}")
+        return None
+
+# Geting all distinct invoicedate values
+distinct_dates = invoice['invoicedate'].drop_duplicates().sort_values()
+
+#Preparing a list to store results
+records = []
+
+#Looping through each date and fetch exchange rate
+for date in distinct_dates:
+    if isinstance(date, pd.Timestamp):
+        date_str = date.strftime('%Y-%m-%d')
+    else:
+        date_str = str(date)
+
+    rate = get_usd_to_ils_rate(date_str)
+
+    if rate is not None:
+        records.append({
+            "invoicedate": date_str,
+            "usd_to_ils_rate": round(rate, 4)
+        })
+
+    time.sleep(1)  #avoiding API overloading
+
+# Creating new DataFrame
+exchange_rates = pd.DataFrame(records)
+print(exchange_rates.head())
+
+#Uploading Result to Dbeaver through Supabase
+exchange_rates.to_sql(
+    "Dim_currency",
+    engine,
+    schema=schema,
+    index=False,
+    if_exists="replace"
+)
+
+#analytics
+#Bringing Tables to python
+#creating function to handle transfer
+import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy import text
+
+user = "postgres.ecftetifgyejngqhxedm"
+password = "DataAnalystProject123"
+host = "aws-0-us-west-1.pooler.supabase.com"
+port = "6543"
+database = "postgres"
+schema = "stg"
+engine = create_engine(f"postgresql://{user}:{password}@{host}:{port}/{database}")
+
+def load_table(table_name):
+    query = text(f"SELECT * FROM stg.{table_name};")
+    return pd.read_sql(query, engine)
+
+dim_employee = load_table("dim_employee")
+dim_employee.head()
+
+dim_customer = load_table("dim_customer")
+dim_customer.head()
+
+dim_track = load_table("dim_track")
+dim_track.head()
+
+dim_playlist = load_table("dim_playlist")
+dim_playlist.head()
+
+fact_invoice = load_table("fact_invoice")
+fact_invoice.head()
+
+fact_invoiceline = load_table("fact_invoiceline")
+fact_invoiceline.head()
+
+dim_currency = load_table('"Dim_currency"')
+dim_currency.head()
+
+#Top 5 artists with most albums
+album_counts = (
+    dim_track
+    .groupby('artist_name')['album_albumid']
+    .nunique()
+    .nlargest(5)
+)
+#Top 5 artists with most tracks
+track_counts = (
+    dim_track
+    .groupby('artist_name')['trackid']
+    .count()
+    .nlargest(5)
+)
+#Top 5 genres with most tracks
+genre_counts = (
+    dim_track
+    .groupby('genre_name')['trackid']
+    .count()
+    .nlargest(5)
+)
+
+import matplotlib.pyplot as plt
+fig, axes = plt.subplots(3, 1, figsize=(10, 15))
+#Top 5 artists with most albums
+axes[0].bar(album_counts.index, album_counts.values)
+axes[0].set_title('Top 5 Artists by Album Count')
+axes[0].set_xlabel('Artist')
+axes[0].set_ylabel('Albums')
+axes[0].tick_params(axis='x', rotation=45)
+#Top 5 artists with most tracks
+axes[1].bar(track_counts.index, track_counts.values)
+axes[1].set_title('Top 5 Artists by Track Count')
+axes[1].set_xlabel('Artist')
+axes[1].set_ylabel('Tracks')
+axes[1].tick_params(axis='x', rotation=45)
+#Top 5 genres with most tracks
+axes[2].bar(genre_counts.index, genre_counts.values)
+axes[2].set_title('Top 5 Genres by Track Count')
+axes[2].set_xlabel('Genre')
+axes[2].set_ylabel('Tracks')
+axes[2].tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.show()
+
+
+import pandas as pd
+#joining
+merging = fact_invoiceline.merge(
+    fact_invoice[['invoiceid','customerid','invoicedate']],
+    on='invoiceid'
+)
+
+# convert merging['invoicedate'] to plain date
+merging['invoicedate'] = pd.to_datetime(merging['invoicedate']).dt.date
+# convert dim_currency['invoicedate'] to plain date
+dim_currency['invoicedate'] = pd.to_datetime(dim_currency['invoicedate']).dt.date
+
+final_merging = merging.merge(
+    dim_currency[['invoicedate','usd_to_ils_rate']],
+    on='invoicedate'
+)
+
+#calculate total in ils
+final_merging['line_total_ils'] = final_merging['line_total'] * final_merging['usd_to_ils_rate']
+
+#sum pre customer
+summary = (
+    final_merging
+    .groupby('customerid')
+    .agg(
+        total_usd=('line_total','sum'),
+        total_ils=('line_total_ils','sum')
+    )
+    .reset_index()
+)
+#show names
+summary = summary.merge(
+    dim_customer[['customerid','firstname','lastname']],
+    on='customerid'
+)
+#final_table
+top5 = summary.nlargest(5, 'total_usd')[
+    ['customerid','firstname','lastname','total_usd','total_ils']
+]
+#final_table into graph
+import matplotlib.pyplot as plt
+
+top5 = summary.nlargest(5, 'total_usd').copy()
+labels = top5['firstname'] + ' ' + top5['lastname']
+
+x = range(len(top5))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.bar(x, top5['total_usd'], width, label='USD')
+ax.bar([i + width for i in x], top5['total_ils'], width, label='ILS')
+
+ax.set_xticks([i + width/2 for i in x])
+ax.set_xticklabels(labels, rotation=45)
+ax.set_ylabel('Purchase Amount')
+ax.set_title('Top 5 Customers by Total Purchases (USD vs ILS)')
+ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+
+import pandas as pd
+import matplotlib.pyplot as plt
+#joining to get invoicedate on each line
+df = fact_invoiceline.merge(
+    fact_invoice[['invoiceid','invoicedate']],
+    on='invoiceid'
+)
+
+#converting date and extract year/month
+df['invoicedate'] = pd.to_datetime(df['invoicedate'])
+df['year']  = df['invoicedate'].dt.year
+df['month'] = df['invoicedate'].dt.month
+
+#sum sales per (year,month)
+monthly = (
+    df
+    .groupby(['year','month'])['line_total']
+    .sum()
+    .reset_index()
+)
+
+#pivot so months are rows and years are columns
+pivot = monthly.pivot(index='month', columns='year', values='line_total')
+#turning pivot into a graph
+fig, ax = plt.subplots(figsize=(12,6))
+pivot.plot(ax=ax, marker='o')
+ax.set_title('Monthly Total Sales by Year')
+ax.set_xlabel('Month')
+ax.set_ylabel('Total Sales (USD)')
+ax.set_xticks(range(1,13))
+ax.legend(title='Year')
+plt.tight_layout()
+plt.show()
+
+
+import matplotlib.pyplot as plt
+
+#sum total sales per song
+sales_per_song = (
+    fact_invoiceline
+    .groupby('trackid')['line_total']
+    .sum()
+    .reset_index()
+)
+
+#bring in mmss column
+merged = sales_per_song.merge(
+    dim_track[['trackid','mmss']],
+    on='trackid'
+)
+
+#parse MM:SS to minutes as float
+def mmss_to_minutes(mmss):
+    m, s = mmss.split(':')
+    return int(m) + int(s)/60.0
+
+merged['minutes'] = merged['mmss'].apply(mmss_to_minutes)
+#visualize
+fig, ax = plt.subplots(figsize=(10,6))
+ax.scatter(merged['minutes'], merged['line_total'])
+ax.set_xlabel('Song Length (minutes)')
+ax.set_ylabel('Total Sales (USD)')
+ax.set_title('Song Length vs Total Sales')
+plt.tight_layout()
+plt.show()
+
+
+import pandas as pd
+
+def recommend_tracks_clean(customer_id, dim_track, fact_invoice, fact_invoiceline,
+                           n_genres=2, tracks_per_genre=3):
+    popularity = fact_invoiceline.groupby('trackid')['invoiceid']\
+                                 .count()\
+                                 .reset_index(name='purchase_count')
+    #customer’s purchased track
+    cust_inv  = fact_invoice.loc[fact_invoice.customerid == customer_id, 'invoiceid']
+    purchased = fact_invoiceline.loc[fact_invoiceline.invoiceid.isin(cust_inv), 'trackid'].unique()
+    #top genres per customer
+    top_genres = (dim_track.loc[dim_track.trackid.isin(purchased), 'genre_name']
+                        .value_counts()
+                        .head(n_genres)
+                        .index
+                        .tolist())
+    #for each genre top tracks customer haven’t bought
+    recs = []
+    for genre in top_genres:
+        cand = (dim_track[dim_track.genre_name == genre]
+                .merge(popularity, on='trackid')
+                .loc[lambda df: ~df['trackid'].isin(purchased)])
+        recs.append(cand.nlargest(tracks_per_genre, 'purchase_count'))
+    #return only names
+    return pd.concat(recs)['track_name'].reset_index(drop=True)
+
+# Prompt for customer ID
+try:
+    customer_id_input = int(input("Enter Customer ID: "))
+    recs = recommend_tracks_clean(customer_id_input, dim_track, fact_invoice, fact_invoiceline)
+
+    if recs.empty:
+        print(f"No recommendations found for Customer {customer_id_input}.")
+    else:
+        print(f"Recommendations for Customer {customer_id_input}:")
+        print("\n".join(f"{i+1}. {name}" for i, name in enumerate(recs)))
+
+except ValueError:
+    print("Invalid input. Please enter a numeric Customer ID.")
+
+
+#personalys data
+import pandas as pd
+
+merged = fact_invoiceline.merge(dim_track[['trackid', 'track_name', 'genre_name']], on='trackid')
+
+merged['genre_name_lower'] = merged['genre_name'].str.lower()
+
+genre1_input = input("first genera: ").strip().lower()
+genre2_input = input("second genera: ").strip().lower()
+
+
+filtered = merged[
+    (merged['genre_name_lower'] == genre1_input) |
+    (merged['genre_name_lower'] == genre2_input)
+]
+
+top_tracks = (
+    filtered.groupby(['track_name'])
+    .size()
+    .reset_index(name='play_count')
+    .sort_values('play_count', ascending=False)
+    .head(15)
+)
+
+valid_genres = dim_track[
+    dim_track['genre_name'].str.lower().isin([genre1_input, genre2_input])
+][['track_name', 'genre_name']]
+
+top_15 = top_tracks.merge(valid_genres, on='track_name', how='left').drop_duplicates(subset='track_name')
